@@ -1,6 +1,6 @@
 # Module 4 — Object Detection & Segmentation: Exam Notes
 
-**Course:** SST Computer Vision (Scaler) · **Sessions covered:** 6, 7, 8, 9 (as taught) + 10 (from the syllabus)
+**Course:** SST Computer Vision (Scaler) · **Sessions covered:** 6, 7, 8, 9, 10 (all from class slides + transcripts)
 
 **Built from:**
 - the class slides for Sessions 6–9
@@ -36,13 +36,14 @@
 | 3 | One-stage detection: SSD, YOLO v1 → v12, anchors vs anchor-free, NMS, IoU, P/R, AP / mAP, Dice | 7 |
 | 4 | Transformers: attention, ViT, **DETR**, two-stage vs one-stage vs DETR, modern detectors, practical analysis | 8 |
 | 5 | Video understanding: 3D CNN, two-stream, I3D, video transformers, tracking | 9 |
-| 6 | Image segmentation: FCN, U-Net, Mask R-CNN, IoU / Dice / mIoU, modern models, lab | 10 |
+| 6 | Image segmentation: kinds, upsampling and transposed conv, losses (CE, focal, Dice), metrics (mIoU, PQ), FCN, SegNet, U-Net, DeepLab, PSPNet, Mask R-CNN, SETR, lab | 10 |
 | 7 | One-page formula sheet | all |
 | 8 | Numericals bank (Section F) | all |
 | 9 | Coding bank (Section D) | all |
 | 10 | Case-study playbook (Section E) | all |
 | 11 | Question bank (Sections A, B, C) | all |
 | 12 | Traps, transcript corrections, mnemonics, last-night checklist | all |
+| 13 | **Doubts clarified: quick revision** (aspect ratio, HOG + SVM, how YOLO and SSD really work, AP chain, why Dice, MLM, DETR walk-through, COCO) | all |
 
 **Symbols used:** ★ = very likely to be examined. "Teacher:" = a point the lecturer stressed in class, so expect it in a question.
 
@@ -1066,6 +1067,69 @@ $$\hat\sigma = \arg\min_{\sigma\in\mathfrak{S}_N}\sum_i^N \mathcal{L}_{match}(y_
 
 - The matching cost uses **class probability AND box similarity**.
 
+#### What is the Hungarian algorithm? ★
+
+**It solves the *assignment problem*:** given an **n × n cost matrix** (n workers × n jobs, or here n predictions × n ground-truth objects), find the **one-to-one pairing with the lowest total cost**. Every row gets exactly one column, and no column is used twice.
+
+- It is also called the **Kuhn–Munkres algorithm** (Kuhn, 1955).
+- **Brute force** tries every pairing: **n!** possibilities. For DETR's N = 100 that is 100! ≈ 10¹⁵⁸, which is impossible.
+- **Hungarian** finds the exact optimum in **O(n³)** time, which is fast.
+- **Greedy is not enough.** Always grabbing the cheapest remaining pair can give a worse total; the example below shows this.
+
+**The steps (for a minimisation problem):**
+1. **Row reduction:** subtract each row's minimum from that row.
+2. **Column reduction:** subtract each column's minimum from that column. Now every row and column has at least one 0.
+3. **Cover all zeros** with the **fewest** horizontal and vertical lines.
+4. If the number of lines **= n**, an optimal assignment exists among the zeros. Go to step 6.
+5. Otherwise, find the **smallest uncovered value k**. **Subtract k** from every uncovered entry and **add k** to every entry covered **twice** (at line intersections). Go back to step 3.
+6. **Pick n zeros**, one in each row and each column. Those positions are the assignment. Add up their **original** costs.
+
+**Worked example** (3 predictions × 3 ground-truth objects; lower cost means a better match):
+
+```
+Original cost        Step 1: row reduce       Step 2: column reduce
+      G1 G2 G3        (row minimums 1,0,2)     (column minimums 1,0,0)
+P1  [  4  1  3 ]      P1 [ 3 0 2 ]             P1 [ 2 0 2 ]
+P2  [  2  0  5 ]      P2 [ 2 0 5 ]             P2 [ 1 0 5 ]
+P3  [  3  2  2 ]      P3 [ 1 0 0 ]             P3 [ 0 0 0 ]
+```
+
+- **Step 3:** cover the zeros using column G2 and row P3. That is **2 lines, fewer than 3**, so continue.
+- **Step 5:** the smallest uncovered value is **k = 1**. Subtract 1 from the uncovered entries and add 1 at the intersection (P3, G2):
+
+```
+      G1 G2 G3
+P1  [  1  0  1 ]
+P2  [  0  0  4 ]
+P3  [  0  1  0 ]     → now the zeros need 3 lines = n ✓
+```
+
+- **Step 6:** pick independent zeros.
+  - P1 has only one zero, so **P1→G2**.
+  - G2 is now taken, so **P2→G1**.
+  - That leaves **P3→G3**.
+- **Total original cost** = 1 + 2 + 2 = **5** (the optimum; checking all 3! = 6 pairings confirms it).
+- **Greedy would fail:** it grabs the cheapest single pair first, P2→G2 (cost 0). The best it can then reach is P1→G1 + P3→G3 = 4 + 2 = **6**, which is worse than 5.
+
+**In code** (SciPy implements this):
+
+```python
+from scipy.optimize import linear_sum_assignment
+import numpy as np
+cost = np.array([[4, 1, 3], [2, 0, 5], [3, 2, 2]])
+rows, cols = linear_sum_assignment(cost)     # rows=[0,1,2], cols=[1,0,2]
+print(cost[rows, cols].sum())                # → 5
+```
+
+**How DETR uses it:**
+- Rows = the N = 100 predictions; columns = the ground-truth objects, padded with ∅ up to N.
+- Cost = $-\hat p(\text{class}) + L_{box}$ (L1 + GIoU).
+- After matching, each real object has **exactly one** prediction responsible for it. Every other prediction, **including duplicates sitting on the same object**, gets ∅ and is trained to say "no object". **That is why DETR needs no NMS.**
+- Matching is only used in **training**. At inference, you simply keep the predictions that are not ∅ and are above a score threshold.
+
+**2-mark answer:**
+> The Hungarian (Kuhn–Munkres) algorithm solves the assignment problem: given an n×n cost matrix, it finds the one-to-one pairing with minimum total cost in O(n³) time, instead of checking all n! pairings. It reduces rows and columns, covers zeros with the fewest lines, and adjusts the matrix until an optimal set of independent zeros exists. DETR uses it to match its N predictions to ground-truth objects (cost = class probability + box L1/GIoU). Unmatched predictions learn "no object", which removes the need for NMS.
+
 **Step 2 — Hungarian loss on the matched pairs:**
 
 $$\mathcal{L}_{Hungarian} = \sum_{i=1}^N\Big[-\log \hat p_{\hat\sigma(i)}(c_i) + \mathbb{1}_{c_i\ne\varnothing}\,\mathcal{L}_{box}(b_i, \hat b_{\hat\sigma(i)})\Big]$$
@@ -1356,145 +1420,402 @@ Self-attention cost grows with the **square** of the token count, so naive patch
 
 # PART 6 — Session 10: Image Segmentation
 
-> **Source note:** No slides/transcript for Session 10 were uploaded, so this part is built from the **syllabus line** (Semantic vs Instance vs Panoptic; FCN, U-Net, Mask R-CNN; IoU / Dice; modern segmentation; lab with a pretrained model) plus what Session 6 & 7 already said about segmentation. These are the standard textbook facts the exam will expect.
+> **Source:** Session 10 slides ("Image Segmentation: from pixels to masks") and the class transcript. **Teacher:** marks points the lecturer stressed in class.
 
-## 6.1 The three kinds of segmentation (very high exam probability)
+## 6.1 Why segmentation? Boxes vs pixels
+
+- **Detection** answers *what + roughly where*: (class, x, y, w, h).
+- **Segmentation** answers *what + exactly which pixels*.
+- **Boxes are good for counting and tracking but poor at shape.**
+  - A **thin object at 45° fills only ~20% of its bounding box**.
+  - Boxes of rotated objects overlap and clutter, and NMS may delete real objects.
+- **Teacher's in-between option:** add a **rotation angle θ** to the box (an oriented box). It fits slanted objects better, but you still don't get the true shape. If shape matters, segment.
+- **When you need segmentation:** *"When the answer to your question is an area, a length or a boundary."*
+  - **Drivable area**, **lane markings** and **curbs** (thin structures).
+  - **Tumour boundary and spread**.
+  - **Robot grasping** (where exactly to put the gripper).
+  - **Defect area**, not just whether a defect is present.
+- **Cost:** the output grows from a few numbers per object to **one label per pixel**.
+
+## 6.2 Kinds of segmentation (very high exam probability)
+
+**The ladder** (density and annotation cost both increase left to right): *choose the cheapest rung that answers your product question.*
+
+| Task | Output |
+|---|---|
+| Classification | 1 label, y ∈ {1…K} |
+| Detection | N boxes, {(c, box)} |
+| **Semantic** | **H×W label map**, one of K classes per pixel |
+| **Instance** | **N binary masks**, {(class, score, mask)} |
+| **Panoptic** | (class, instance-id) for **every** pixel |
 
 | | **Semantic** | **Instance** | **Panoptic** |
 |---|---|---|---|
-| Question answered | "What **class** is each pixel?" | "Which **object** does each pixel belong to?" | "Class **and** object id for **every** pixel" |
-| Two cars side by side | Same label "car" → one blob | car#1, car#2 separate masks | car#1, car#2 separate **+** road/sky/building labelled |
-| Background (sky, road) | Labelled | **Ignored** (only countable objects) | Labelled |
-| Covers | Stuff + things, no ids | **Things only**, with ids | **Stuff + things**, things with ids |
-| Typical model | FCN, U-Net, DeepLab | Mask R-CNN | Panoptic FPN, Mask2Former |
-| Metric | mIoU, Dice | Mask AP | PQ (Panoptic Quality) |
+| Label per pixel | class | (class, id) for **things only** | (class, id) for **all** pixels |
+| Separates instances? | **No** (both cars = "car") | **Yes** (car #1 vs car #2: count, track, grasp) | **Yes** |
+| Covers stuff (road, sky)? | **Yes** | **No** (ignores amorphous background) | **Yes** |
+| Overlaps? | — | masks may overlap | **Non-overlapping**: each pixel belongs to exactly one segment |
+| Metric | **mIoU** | **mask AP** | **PQ** |
+| Example models | FCN, U-Net, DeepLab | Mask R-CNN, SOLO, Mask2Former | Panoptic FPN, Mask2Former |
 
-- **Things** = countable objects you care to separate (cars, people, birds).
-- **Stuff** = amorphous regions, no need to count (sky, road, grass, buildings in the driving example).
-- **Panoptic = Semantic (stuff) + Instance (things).** The teacher's encoding idea: label `2 = car`, and `2.1, 2.2, 2.3` = individual cars.
+- **Panoptic** was introduced by **Kirillov et al., CVPR 2019**, together with the PQ metric. Stuff pixels share **one id per class**.
+- **Things** are **countable** objects with a well-defined shape (car, person, bicycle, sign, cell nucleus), so instance ids make sense.
+- **Stuff** is **amorphous**, defined by texture or material (road, sky, grass, water, wall). *"How many skies?" is not a meaningful question.*
+- **Crowd edge case:** is a crowd of pedestrians 200 m away stuff or things? Datasets disagree. **COCO has an `iscrowd` flag** for exactly this; such crowds are usually treated as one region.
+- **Warehouse robot picking individual boxes off a pallet** → you need **instance** segmentation. Semantic segmentation merges touching boxes into one blob.
 
-**Why instance matters (teacher's autonomous-driving example):** with a semantic mask, two overlapping cars become one blob → when you project the mask to 3D using a depth map you assign *one* depth to two different cars and lose the gap between them. Instance masks keep them separate. Buildings don't need ids → stuff.
+**The wider family:**
 
-**Memory hook:** *Semantic = "what", Instance = "which one", Panoptic = "what + which one, everywhere".*
+| Task | What it is |
+|---|---|
+| Binary / foreground | Object vs background: salient objects, **matting** (soft alpha), portrait mode |
+| Part segmentation | Parts of an object: human parsing (hair, face, arms), car parts for damage assessment |
+| Video object segmentation | Track given masks through time (DAVIS, YouTube-VOS) |
+| 3D / point cloud | Per-point labels on **LiDAR** scans (SemanticKITTI; PointNet++, Cylinder3D) |
+| Referring / open-vocabulary | Segment what a **text phrase** describes ("the man in the red shirt"), using CLIP-style image-text embeddings |
+| Promptable / interactive | Click, box or text → mask: **SAM, SAM 2, SAM 3**. *The default annotation tool today* |
 
-## 6.2 Why segmentation is harder than detection
+## 6.3 Applications and datasets
 
-- Output is **dense**: one prediction per pixel (H × W × C) vs 4 numbers + class per box.
-- Needs **both** global context (what is it?) **and** fine spatial detail (exact boundary). CNN down-sampling gives context but destroys detail → architectures must **recover resolution** (upsampling + skip connections).
-- Annotation is expensive (someone must draw polygons around each object). Today, foundation models like **SAM** pre-label, humans only verify.
+- **Autonomous driving / ADAS:**
+  - free space for planning
+  - lanes and curbs
+  - pedestrians' exact extent (for time-to-collision)
+  - **BEV semantic maps**
+  - LiDAR point segmentation
+  - **Constraint:** tens of milliseconds on an automotive chip.
+- **Medical:**
+  - tumours and lesions (brain MRI as **slices**, liver CT, skin)
+  - organ contouring for radiotherapy
+  - cells and nuclei
+  - retinal vessels, polyps
+  - **Often 3D volumes, few labelled scans, severe class imbalance** (BraTS, ISIC, Medical Segmentation Decathlon).
+- **Earth observation:** land cover, building footprints, **flood, forest-fire and deforestation boundaries**.
+- **Agriculture:** crop vs weed for targeted spraying.
+- **Industry:** crack, scratch and corrosion **area**.
+- **Robotics / AR / photos:**
+  - grasping, traversable terrain
+  - **portrait-mode blur**
+  - "select subject" photo editing
+  - AR occlusion (virtual objects go behind real people).
 
-## 6.3 FCN — Fully Convolutional Network (Long et al., 2015)
+| Dataset | Domain | Classes | Size | Task |
+|---|---|---|---|---|
+| PASCAL VOC 2012 | everyday | **20 + background** | 1.5K train / 1.4K val | semantic |
+| **Cityscapes** | urban driving, 50 cities | **19** evaluated | 5K fine + 20K coarse, **2048×1024** | semantic / instance / panoptic |
+| ADE20K | diverse scenes | **150** | 20K / 2K | semantic |
+| COCO | everyday | **80 things + 53 stuff** | 118K / 5K | instance / panoptic |
+| SemanticKITTI | LiDAR | 19 | 22 sequences | point cloud |
+| SA-1B (SAM) | — | — | **11M images, 1.1B masks** | promptable |
 
-**Idea in one line:** take a classification CNN, **replace the fully connected layers with convolutions** so the network outputs a *map of class scores* instead of one vector, then **upsample** that map back to image size.
+**Labels are the bottleneck:**
+- **~1.5 h** to finely annotate **one Cityscapes image**.
+- **~79 s per object mask** in COCO.
+- SA-1B was built with a **model in the loop**.
 
-```
-Image (H×W×3)
-  → CNN backbone (VGG) — downsamples ×32
-  → 1×1 conv  (FC layers turned into convolutions) → coarse score map (H/32 × W/32 × C)
-  → upsample (transposed convolution / "deconvolution") → H × W × C
-  → argmax over C per pixel → segmentation map
-```
+Fixes:
+- **Weak labels:** boxes, points, scribbles, image tags.
+- **Semi-supervised** training and **synthetic** data.
+- **Model-in-the-loop:** a promptable model proposes, a human corrects.
 
-- **Why 1×1 conv instead of FC?** FC needs a fixed input size; convs accept **any input size** and keep the spatial layout. (Same reason Fast R-CNN needed RoI pooling — FC layers want fixed size.)
-- **Skip connections:** upsampling ×32 in one jump gives blobby masks. FCN adds scores from earlier, higher-resolution layers:
-  - **FCN-32s** — upsample ×32 from the last layer only (coarsest).
-  - **FCN-16s** — fuse with pool4, then ×16.
-  - **FCN-8s** — also fuse pool3, then ×8 (sharpest).
-- **Loss:** per-pixel cross-entropy (softmax over C classes at every pixel).
-
-**Transposed convolution output size** (likely numerical):
-
-$$\text{out} = (n-1)\cdot s - 2p + k \;(+\text{output\_padding})$$
-
-Example: n = 7, k = 4, s = 2, p = 1 → (7−1)·2 − 2 + 4 = **14** (doubles the size).
-
-## 6.4 U-Net (Ronneberger et al., 2015 — biomedical images)
-
-```
- Encoder (contracting)                     Decoder (expanding)
- conv-conv ───────────── copy & concat ──────────► up-conv, conv-conv  → 1×1 conv → mask
-   ↓ maxpool                                         ↑ up-conv
- conv-conv ───────────── copy & concat ──────► conv-conv
-   ↓                                                 ↑
- conv-conv ───── copy & concat ─────► conv-conv
-   ↓                                    ↑
-           bottleneck (conv-conv)  ─────┘
-                     "U" shape
-```
-
-- **Encoder** captures *what* (context), **decoder** recovers *where* (localisation).
-- **Skip connections concatenate** encoder feature maps with decoder feature maps at the same resolution → restores fine boundary detail lost in pooling.
-- Works with **very few training images** (heavy augmentation, elastic deformations) → hugely popular in medical imaging.
-- Original paper: 572×572 input → 388×388 output (unpadded "valid" convs); modern versions use padding so output = input size.
-
-**FCN vs U-Net (classic 2-mark question):**
-
-| | FCN | U-Net |
-|---|---|---|
-| Skip fusion | **Adds** (sums) score maps | **Concatenates** feature maps |
-| Decoder | Very light (1–3 upsampling steps) | **Symmetric**, as deep as encoder |
-| Strength | First end-to-end dense predictor | Sharp boundaries, small datasets (medical) |
-
-## 6.5 Mask R-CNN (He et al., 2017) — instance segmentation
-
-**One line:** *Faster R-CNN + a small FCN "mask head" that predicts a binary mask inside every detected box.*
+## 6.4 Problem formulation: classification at every pixel
 
 ```
-Image → Backbone (ResNet + FPN) → RPN proposals
-      → RoIAlign (fixed 7×7 / 14×14 features per RoI)
-      → ┌ class head   (softmax over K+1)
-        ├ box head     (bbox regression)
-        └ mask head    (small FCN → K masks of 28×28, sigmoid per pixel)
+Image H×W×3 → network f_θ → scores H×W×K → softmax over K → argmax → label map H×W
 ```
 
-Key points examiners love:
+- It is the **same network and loss as classification, applied H×W times**.
+- **Cityscapes: 1024 × 2048 ≈ 2.1 M pixel predictions per image.**
+- **The hard part:** each prediction needs **both local detail and global context**.
 
-1. **Three parallel heads**; loss $L = L_{cls} + L_{box} + L_{mask}$.
-2. **Mask loss = per-pixel binary cross-entropy (sigmoid)**, computed **only on the mask of the ground-truth class** → masks of different classes don't compete. *Decouples* "what class" (class head) from "what shape" (mask head). Softmax across classes for the mask was worse.
-3. **RoIAlign replaces RoIPool.** RoIPool **rounds** (quantises) the RoI coordinates and bin boundaries to integers → a misalignment of up to a few pixels — harmless for boxes, harmful for pixel-accurate masks. **RoIAlign uses no rounding; it samples with bilinear interpolation.** Gave a big jump in mask accuracy.
-4. Mask head is small (28×28 output per RoI) → only ~20% overhead over Faster R-CNN (~5 fps in the paper).
-5. Same framework also does **human keypoint detection** (one-hot mask per keypoint).
+**Naive idea #1: classify a patch around every pixel** (sliding window). It needs context, because one pixel's RGB alone is meaningless.
 
-**Mnemonic: "Mask R-CNN = Faster R-CNN + Mask head + RoIAlign."**
+| Problem | Why |
+|---|---|
+| Cost | One forward pass per pixel: **~2.1 M passes** per image |
+| Redundant | Adjacent patches share almost all pixels, so features are recomputed again and again |
+| Fixed context | The patch size caps what the model sees. **Teacher:** you force the network to see only local information |
 
-## 6.6 Segmentation metrics (Session 7 introduced IoU & Dice — numerical favourites)
+**Naive idea #2: stack convolutions at full resolution** (with padding, so the size never shrinks).
 
-For a predicted mask **P** and ground-truth mask **G** (sets of pixels):
+| Problem | Why |
+|---|---|
+| Memory | Activations scale as **H×W×C at every layer** |
+| Context | To see **1,000 px you'd need ~500 layers of 3×3** (each adds 2 px of receptive field) |
+| Noise (teacher) | Repeated zero padding adds irrelevant values at the borders, and that noise compounds layer after layer |
+
+**The fix: an encoder–decoder (downsample, then upsample):**
+- **Encoder** = a classification backbone (VGG, ResNet, MiT). It is cheap and has a **large receptive field**.
+- **Bottleneck** holds the semantics (**"what"**) at low resolution.
+- **Decoder** restores the resolution (**"where"**).
+- **Output stride (OS) = input size / feature size.** For example, **OS 32 turns 1024×2048 into 32×64**.
+
+## 6.5 Upsampling operators ★ (numericals)
+
+**Nearest neighbour** (copy the value) vs **bilinear** (weighted average of the 4 neighbours):
+
+```
+Input 2×2      Nearest ×2 → 4×4      Bilinear (align_corners=True) → 3×3
+1 2            1 1 2 2               1.0 1.5 2.0
+3 4            1 1 2 2               2.0 2.5 3.0
+               3 3 4 4               3.0 3.5 4.0
+               3 3 4 4
+```
+
+$$f(x,y) \approx (1-a)(1-b)f_{00} + a(1-b)f_{10} + (1-a)b\,f_{01} + ab\,f_{11}$$
+
+- **Nearest** is fast, but gives blocky edges and no new values.
+- **Bilinear** is smooth but can blur boundaries. It is the standard **final step** back to full resolution.
+- **Gotcha:** `align_corners=True` and `False` give different grids, so keep training and export consistent.
+
+**Unpooling:**
+- **Bed of nails:** put the value in a fixed corner of each block and zeros elsewhere.
+- **Max unpooling:** during max-pooling, **remember which position held the max (the indices)**. When upsampling, put each value back **at that position** and zeros elsewhere.
+  - This needs **corresponding (paired) downsampling and upsampling layers**. Used in **SegNet**.
+  - It gives a **sparse** output, so **trainable convs afterwards densify it**.
+
+```
+Max-pool 4×4 → 2×2 (remember argmax positions)       Max-unpool 2×2 → 4×4
+1 2 | 6 3                                             0 0 | 2 0
+3 5 | 2 1        →   5 6     ... network ...  1 2  →  0 1 | 0 0
+----+----            7 8                      3 4     ----+----
+1 2 | 2 1                                             0 0 | 0 0
+7 3 | 4 8                                             3 0 | 0 4
+```
+
+**Transposed convolution** (learnable upsampling; also called a fractionally-strided conv, up-convolution, or the misleading name "deconvolution"):
+- **Each input value multiplies the whole k×k kernel and "stamps" it onto the output.** The input gives the weight for the filter.
+- **The stride sets the step on the OUTPUT grid** (stride 2 makes the output roughly 2× larger).
+- **Where stamps overlap, they are summed.**
+- Weights are learned like any conv. **FCN initialised them to bilinear interpolation**, which gives a sensible starting point and stable early training.
+- **Parameters = k·k·C_in·C_out (+ C_out bias)**, the same as a normal conv.
+
+$$o = (i-1)\,s - 2p + k + \text{output\_padding}$$
+
+| i | k | s | p | out_pad | o | Comment |
+|---|---|---|---|---|---|---|
+| 4 | 3 | 1 | 0 | 0 | **6** | stride 1 still grows by k − 1 |
+| 4 | 2 | 2 | 0 | 0 | **8** | U-Net up-conv, no overlap |
+| 4 | 4 | 2 | 1 | 0 | **8** | clean ×2 (k divisible by s) |
+| 4 | 3 | 2 | 1 | 1 | **8** | ×2 but uneven overlap |
+| 16 | 4 | 2 | 1 | 0 | **32** | a typical decoder step |
+
+- **Checkerboard artifacts** appear when **k is not divisible by s** (uneven overlap).
+- **Fix: resize + conv.** Bilinear ×2, then a 3×3 conv. There is no uneven overlap by construction, so it is the default in modern decoders. The cost: the conv runs at the higher resolution.
+- **Pixel shuffle** (ESPCN, super-resolution): the conv outputs **C·r² channels**, which are **rearranged** into an r× larger map.
+
+| Operator | Learnable? | Watch out for | Seen in |
+|---|---|---|---|
+| Nearest / bilinear | No | blocky / blurry edges | FPN, DeepLab, SegFormer |
+| Max unpooling | No (needs indices) | sparse output | SegNet |
+| Transposed conv | Yes, k²·C_in·C_out | checkerboard if k % s ≠ 0 | FCN, U-Net |
+| Resize + conv | Yes | conv at high resolution costs more | modern decoders |
+| Pixel shuffle | Yes, k²·C_in·C_out·r² | channel count × r² | ESPCN, super-resolution |
+
+**Slide exercise (answers):**
+1. `ConvTranspose2d(k=4, s=2, p=1)` on 16×16 → (16 − 1)·2 − 2 + 4 = **32×32**.
+2. Three 3×3 convs with dilation 1, 2, 4 → RF = 1 + 2·1 + 2·2 + 2·4 = **15×15**.
+3. OS 32 on 512×1024 → **16×32**; at OS 8 → **64×128**.
+4. FCN initialised transposed convs to **bilinear** so they start as a sensible upsampler, not random noise.
+5. 3×3 conv, dilation 6, padding 6, stride 1 on 64×64 → k_eff = 3 + 2·5 = **13**; output = (64 + 12 − 13) + 1 = **64×64** (size kept).
+
+**Dilated (atrous) convolution:** spread the kernel taps apart by rate r. You get a bigger receptive field **with the same number of weights and no downsampling**: $k_{eff} = k + (k-1)(r-1)$. **Teacher:** the 3×3 filter covers a wider region with the same 9 parameters, which preserves global context.
+
+## 6.6 Losses ★
+
+**Pixel-wise cross-entropy** (the default):
+- Average over all labelled pixels.
+- **Void/unlabelled pixels are skipped with `ignore_index=255`.**
+- Logits are upsampled to the label size.
+- Example: the true-class probability at a pixel is 0.70, so the loss = −ln 0.70 = **0.357**.
+
+**Problem: class imbalance.** Road, sky and buildings dominate the pixel counts; poles, lights and bikes are tiny.
+- Teacher: if the model **never predicts a small object, the CE loss is still low**, because those pixels are so few.
+- Classic interview framing: *"cancer in 1 of 100 people: predicting 'no cancer' always gives 99%"*.
+
+**Fixes:**
+- **Weighted CE:** $w_k \propto 1/\text{freq}_k$, or **median-frequency balancing** (SegNet).
+- **Focal loss:** **down-weights easy pixels** so the hard ones drive the gradient. Background is automatically down-weighted.
+
+$$FL = -\sum_i (1 - p_i)^{\gamma}\log p_i\qquad(\gamma \approx 2;\ \gamma = 0 \text{ gives plain CE})$$
+
+  For an easy pixel with p = 0.9: (0.1)² = 0.01, so it contributes 100× less. A hard pixel with p = 0.3: (0.7)² = 0.49, so it barely shrinks.
+
+  > **Slide typo:** the slide writes $(i - p_i)^\gamma$. It should be **(1 − p_i)^γ**.
+
+- **Dice loss = 1 − Dice coefficient.** It optimises overlap directly.
+  - A lesion covering < 1% of pixels: predicting "all background" gives **> 99% accuracy but Dice = 0**.
+  - **Teacher:** Dice *"emphasises the overlapping area"* (2 × overlap), so small objects still give a signal.
+
+**"95% pixel accuracy, but the model never predicts 'traffic light'": what do you try first?** Weighted CE or focal loss (or add Dice loss), and check the **per-class IoU** for traffic light.
+
+## 6.7 Metrics ★ (worked examples from the slides)
 
 | Metric | Formula | Note |
 |---|---|---|
-| Pixel accuracy | correct pixels / all pixels | **Misleading** with class imbalance (90% background → 90% accuracy by predicting all background) |
-| IoU (Jaccard) | $\dfrac{\lvert P\cap G\rvert}{\lvert P\cup G\rvert} = \dfrac{TP}{TP+FP+FN}$ | per class |
-| mIoU | mean of per-class IoU | standard for semantic segmentation (PASCAL VOC, Cityscapes) |
-| Dice (F1) | $\dfrac{2\lvert P\cap G\rvert}{\lvert P\rvert+\lvert G\rvert} = \dfrac{2TP}{2TP+FP+FN}$ | **Dice ≥ IoU** always; standard in medical imaging |
-| Conversion | $D = \dfrac{2J}{1+J}$, $\;J = \dfrac{D}{2-D}$ | J = IoU |
-| PQ (panoptic) | $\dfrac{\sum_{TP} \text{IoU}}{\lvert TP\rvert + \tfrac12\lvert FP\rvert + \tfrac12\lvert FN\rvert}$ = SQ × RQ | a segment is a TP if IoU > 0.5 |
+| Pixel accuracy | correct / total | **misleading under imbalance** |
+| IoU (per class) | TP / (TP + FP + FN) | standard for segmentation |
+| **mIoU** | mean of per-class IoU | **rare classes count equally** |
+| Dice / F1 | 2TP / (2TP + FP + FN) = 2·IoU/(1 + IoU) | ≥ IoU, used for small objects |
 
-**Why Dice for small objects / medical (teacher's point):** Dice counts the overlap **twice** in the numerator, so it gives more weight to overlap; for tiny structures (few pixels) IoU punishes small misalignments very harshly, Dice is gentler and gives a smoother training signal. **Dice loss = 1 − Dice** is used to fight foreground/background imbalance.
+- **Accumulate TP/FP/FN over the whole dataset per class, then divide.** Don't average per-image IoUs.
+- **Report per-class IoU too.** A good mIoU can hide a class that is always wrong.
+- **Instance segmentation** uses **mask AP** (COCO-style, IoU on masks); **panoptic** uses **PQ**.
 
-**Worked numerical:** GT mask = 100 px, predicted mask = 80 px, overlap = 60 px.
-- Union = 100 + 80 − 60 = 120 → **IoU = 60/120 = 0.50**
-- **Dice = 2·60 / (100 + 80) = 120/180 = 0.667**
-- Check: 2(0.5)/(1+0.5) = 0.667 ✓
+**Worked example (4×4 image, two classes):**
 
-**mIoU numerical:** IoU(road)=0.9, IoU(car)=0.6, IoU(person)=0.3 → mIoU = (0.9+0.6+0.3)/3 = **0.60**. Notice how a rare class (person) drags the mean — that's why mIoU is fairer than pixel accuracy.
+| | \|GT\| | \|Pred\| | ∩ | ∪ | IoU |
+|---|---|---|---|---|---|
+| class 0 (grey) | 9 | 9 | 8 | 10 | **0.80** |
+| class 1 (red) | 7 | 7 | 6 | 8 | **0.75** |
 
-## 6.7 Modern segmentation (overview level — know names + one line each)
+- **mIoU** = (0.80 + 0.75)/2 = **0.775**.
+- **Pixel accuracy** = 14/16 = **0.875** (8 + 6 correct pixels).
+- **Dice (class 1)** = 2·6/(7 + 7) = **0.857**.
+- **Think:** add a third class that appears once in the GT and is never predicted. Its IoU = 0, so **mIoU drops to (0.80 + 0.75 + 0)/3 ≈ 0.52**. Pixel accuracy barely changes (≈ 14/17). **mIoU exposes the failure; accuracy hides it.**
+
+**Panoptic Quality (PQ):**
+
+$$PQ = \underbrace{\frac{\sum_{TP}\text{IoU}}{|TP|}}_{SQ\text{ (segmentation quality)}} \times \underbrace{\frac{|TP|}{|TP| + \frac12|FP| + \frac12|FN|}}_{RQ\text{ (recognition quality, an F1)}}$$
+
+- A segment is a **match if IoU > 0.5**, so each GT matches at most one prediction.
+- **SQ** = how well the matched segments are drawn. **RQ** = did we find the right segments (like an F1 of detection).
+- Computed per class, averaged, and reported separately for things and stuff.
+- **Slide example:** TP IoUs 0.8 and 0.6; 1 FP; 1 FN.
+  - SQ = 1.4/2 = **0.70**
+  - RQ = 2/(2 + 0.5 + 0.5) = **0.667**
+  - **PQ = 0.467**
+
+## 6.8 Architectures: a decade of segmentation networks
+
+**Timeline (CNN era → transformer / foundation-model era):**
+
+| Year | Models |
+|---|---|
+| 2015 | **FCN, U-Net, SegNet**, DeepLab v1 |
+| 2017 | **PSPNet, DeepLab v3, Mask R-CNN** |
+| 2018 | DeepLab v3+ |
+| 2019 | Panoptic FPN |
+| 2021 | **SETR, SegFormer, MaskFormer** |
+| 2022 | Mask2Former |
+| 2023 | **SAM** |
+| 2024 | SAM 2 |
+| 2025 | SAM 3 |
+
+### FCN (2015): the first end-to-end dense predictor
+
+- A classification CNN with the **FC layers replaced by 1×1 convolutions** gives a coarse class-score map, which is then **upsampled** with transposed convs (initialised to bilinear).
+- **Slide example:** input **512×512×3**, **21 classes** (VOC 20 + background), output **512×512×21 logits**, then argmax per pixel.
+- **Skip connections ADD** score maps from earlier layers:
+  - **FCN-32s**: upsample ×32 in one step (coarse)
+  - **FCN-16s**: + pool4
+  - **FCN-8s**: + pool3 (sharpest)
+- **Why 1×1 conv instead of FC?** It accepts **any input size** and keeps the spatial layout.
+
+### SegNet (2015): symmetric encoder–decoder with pooling indices
+
+- VGG-16 encoder, then a decoder that uses **max unpooling with the indices from the matching encoder layer**, plus **trainable convs to densify** the sparse map.
+- **Memory-light:** it stores **indices, not feature maps** (U-Net stores whole maps).
+- **Median-frequency class balancing**; aimed at **road scenes and real-time** use.
+- **Indices recover** *where* the strong activations were (sharp localisation of edges). They **can't recover** the actual fine feature values or texture, because everything else becomes zero.
+- **Teacher:** max unpooling is chosen over bilinear because it is cheap and reuses the remembered positions.
+
+### U-Net (2015) ★ "the architecture to remember"
+
+```
+572×572 in ─ conv,conv ─────────── copy & crop (CONCATENATE) ───────────► up-conv, conv,conv → 1×1 conv → 388×388 out
+               ↓ 2×2 maxpool (channels double)                         ↑ 2×2 up-conv (channels halve)
+              ...                       bottleneck                     ...
+```
+
+- **Down:** 2 × (3×3 conv + ReLU), then a 2×2 max-pool; the **channels double**.
+- **Up:** a 2×2 up-conv **halves the channels**, then **concatenate the encoder features**, then 2 × 3×3 conv.
+- **Skips CONCATENATE (U-Net) rather than ADD (FCN).** A 1×1 conv at the end gives the class scores. The symmetric "U" gives the name.
+- **Teacher:** the skip connections let information flow **directly** from encoder to decoder, so the decoder gets the full-resolution detail at every level.
+
+**Why it worked with ~30 training images** (ISBI 2012, electron microscopy):
+- Skip concatenation gives the decoder full-resolution detail.
+- **Elastic deformation augmentation**, which is realistic for tissue.
+- A **weighted loss that up-weights the thin gaps between touching cells**, which separates instances.
+- **Overlap-tile with mirrored borders** lets it segment images of any size.
+- **Valid (unpadded) convs shrink the output: 572 → 388.**
+- It runs in **< 1 s** for 512×512 on a 2015 GPU, and **won the ISBI 2015 cell-tracking challenge** by a large margin.
+
+**The U-Net family** ("U-Net is a **pattern**, not a fixed network"):
+
+| Variant | Year | Idea |
+|---|---|---|
+| 3D U-Net | 2016 | volumetric convs for CT/MRI |
+| Attention U-Net | 2018 | attention gates filter the skip features |
+| U-Net++ | 2018 | nested, dense skip pathways |
+| **nnU-Net** | 2021 | self-configuring; a tough medical baseline |
+| TransUNet | 2021 | a transformer in the bottleneck |
+| Diffusion U-Nets | 2022+ | **the denoiser in Stable Diffusion** |
+
+### DeepLab family (2015–2018) ★
+
+**v1 / v2:**
+- **Atrous (dilated) backbone** keeps the features at **1/8 resolution (OS 8)** while preserving the pretrained context.
+- Coarse scores → **bilinear ×8** → a **fully-connected CRF** post-processing step that snaps labels to image edges.
+- **v2 adds ASPP** with parallel atrous branches at **rates 6, 12, 18, 24** for multi-scale objects.
+- There is **no learned decoder**.
+
+**Think:** a colour-based CRF helps at boundaries but can **hurt on a black car on dark asphalt**: similar colours make the CRF merge car and road.
+
+**v3 — ASPP (Atrous Spatial Pyramid Pooling)** on OS-16 features, with parallel branches:
+- 1×1 conv
+- 3×3 at rate 6, 12 and 18
+- **image pooling** (global context: the "whole scene" branch)
+- These are concatenated, then a 1×1 conv. There is **BatchNorm in every branch**. **The CRF was removed**, since better features made it unnecessary.
+
+**v3+ (2018):**
+- Encoder = atrous backbone + ASPP. A **light decoder fuses the stride-4 low-level features** (1×1 → 48 channels), giving **sharper boundaries**.
+- **Depthwise-separable** atrous convs (Xception/MobileNet) keep it efficient. It is still a strong, widely deployed CNN baseline.
+
+### PSPNet (2017): pyramid pooling for global context
+
+- On a dilated ResNet (OS 8), **pool the feature map into 1×1, 2×2, 3×3 and 6×6 bins**. Apply a 1×1 conv to each, upsample, **concatenate with the original**, then conv.
+- **Pooling-based** multi-scale context (ASPP is **dilation-based**).
+- The **global prior fixes context mistakes**: *boat vs car* (water around it), *pillow vs bed-sheet*.
+- **Winner of the ImageNet 2016 scene-parsing challenge.**
+
+### Mask R-CNN (2017): instance segmentation
+
+- **Faster R-CNN + a parallel mask branch**: a small FCN per RoI predicts **K class-specific 28×28 masks**.
+- **Sigmoid + binary cross-entropy per pixel. Only the GT class's mask is penalised**, so mask and class are **decoupled** (no competition between classes).
+- **RoIAlign instead of RoIPool:**
+  - RoIPool rounds the coordinates to integers, causing pixel misalignment.
+  - RoIAlign uses bilinear sampling with no rounding, which is crucial for pixel accuracy.
+- **L = L_cls + L_box + L_mask**; about **5 fps** in the original paper.
+- **Teacher:** *"to learn segmentation masks you just introduce a new head"* on the detector.
+
+### SETR (2021): a pure ViT encoder for segmentation
+
+- 16×16 patches + position embeddings → **ViT-Large (24 layers)** → reshape to **H/16 × W/16** → a decoder (naive / PUP / MLA).
+- It was the **first strong pure-transformer result**. But:
+  - Its features are **single-scale at 1/16**, with no fine detail from early stages.
+  - It is **heavy: ~318M parameters for ~50.2 mIoU on ADE20K**.
+  - The **positional embeddings tie it to the training resolution**.
+- **SegFormer** fixes this with a hierarchical, multi-scale encoder (MiT) and a light all-MLP decoder.
+- **MaskFormer / Mask2Former:** mask queries (like DETR) handle semantic, instance **and** panoptic in one model.
+- **SAM / SAM 2 / SAM 3:** promptable foundation models used for auto-labelling.
+
+**Architecture one-liners:**
 
 | Model | One-line idea |
 |---|---|
-| **DeepLab (v1–v3+)** | **Atrous (dilated) convolution** enlarges receptive field without down-sampling; **ASPP** (Atrous Spatial Pyramid Pooling) = parallel dilated convs at several rates for multi-scale context; v3+ adds a decoder. |
-| **PSPNet** | Pyramid pooling module — pool the feature map at several grid sizes for global context. |
-| **Mask2Former / MaskFormer** | Transformer with **mask queries** (like DETR's object queries) — one architecture for semantic, instance **and** panoptic. |
-| **SAM (Segment Anything, Meta 2023)** | **Promptable** foundation model: give a point / box / text-like prompt → mask. Trained on 1B+ masks; used to **auto-label** data (teacher: "for segmentation we have Segment Anything"). SAM 2 extends to video. |
-| **Panoptic FPN** | Mask R-CNN + a semantic-segmentation branch on the FPN → panoptic output. |
+| FCN | 1×1 conv + upsample, **add** skips |
+| SegNet | max-**unpool with indices** |
+| U-Net | symmetric U, **concatenate** skips, ~30 images |
+| DeepLab | **atrous** + **ASPP** (+ CRF in v1/v2; decoder in v3+) |
+| PSPNet | **pyramid pooling** 1/2/3/6 |
+| Mask R-CNN | detector + **mask head** + **RoIAlign** |
+| SETR | **ViT encoder**, single-scale 1/16 |
 
-**Dilated convolution numerical:** effective kernel size $k_{eff} = k + (k-1)(r-1)$. A 3×3 kernel with dilation r = 2 → 3 + 2·1 = **5×5** receptive field with only 9 weights.
-
-## 6.8 Lab: run a pretrained segmentation model (expect a "predict the output / fill the blank" coding MCQ)
+## 6.9 Lab: run a pretrained segmentation model (expect "predict the output" questions)
 
 ```python
-import torch, torchvision
+import torch
 from torchvision.models.segmentation import deeplabv3_resnet50, DeepLabV3_ResNet50_Weights
 from PIL import Image
 
@@ -1508,20 +1829,28 @@ x = preprocess(img).unsqueeze(0)                        # [1, 3, H, W]  (add bat
 with torch.no_grad():                                   # inference: no gradients
     out = model(x)["out"]                               # [1, 21, H, W]  21 = 20 VOC classes + background
 mask = out.argmax(dim=1)[0]                             # [H, W]  class id per pixel
+
+loss_fn = torch.nn.CrossEntropyLoss(ignore_index=255)   # training: skip void pixels
 ```
 
-- Output shape **[N, C, H, W]** → `argmax(dim=1)` over the class dimension gives the label map.
-- Instance segmentation version: `torchvision.models.detection.maskrcnn_resnet50_fpn` → returns a list of dicts with `boxes`, `labels`, `scores`, `masks` ([N, 1, H, W] soft masks → threshold at 0.5).
-- Common bugs examiners test: forgetting `.eval()`, forgetting `unsqueeze(0)`, argmax on the wrong dim, not normalising like training.
+- The output shape is **[N, C, H, W]**, so `argmax(dim=1)` over the class dimension gives the label map.
+- For **instance** segmentation, `maskrcnn_resnet50_fpn` returns `boxes`, `labels`, `scores` and `masks` ([N, 1, H, W] soft masks; threshold at 0.5).
+- **Common bugs:**
+  - forgetting `.eval()`
+  - forgetting `unsqueeze(0)`
+  - taking argmax on the wrong dimension
+  - not normalising the way training did
+  - mixing up `align_corners` between training and export
 
-## 6.9 Quick self-test (Session 10)
+## 6.10 Quick self-test (Session 10)
 
-1. Self-driving car must know free road area **and** separate each pedestrian → **panoptic**.
-2. Counting cells in a microscope image where cells touch → **instance** (semantic would merge touching cells).
-3. Why does Mask R-CNN use sigmoid + BCE for masks instead of softmax? → decouples mask from class; avoids inter-class competition; class is decided by the class head.
-4. RoIPool vs RoIAlign → quantisation vs bilinear interpolation; RoIAlign needed for pixel-accurate masks.
-5. Dice = 0.8 → IoU = 0.8 / (2 − 0.8) = **0.667**.
-
+1. Count individual cells that touch each other → **instance** segmentation (U-Net used a weighted loss on the gaps between touching cells for this).
+2. ConvTranspose2d(k=2, s=2, p=0) on 8×8 → (8 − 1)·2 + 2 = **16**.
+3. Why concatenate (U-Net) instead of add (FCN)? Concatenation keeps the encoder's features **separate**, so the decoder learns how to combine detail and semantics. Adding forces them into the same channels.
+4. ASPP vs PSPNet → **dilation-based** vs **pooling-based** multi-scale context.
+5. Dice = 0.8 → IoU = 0.8/1.2 = **0.667**.
+6. Focal loss with γ = 2 and p = 0.9 → weight (0.1)² = **0.01**.
+7. PQ with TP IoUs 0.9 and 0.7, 0 FP, 2 FN → SQ = 0.8, RQ = 2/(2 + 1) = 0.667, **PQ = 0.533**.
 
 ---
 
@@ -2470,3 +2799,165 @@ The transcripts are speech-to-text and contain errors. Use the **left column** i
 - [ ] Video: 4D tensor, late fusion vs 3D CNN, two-stream 2(T−1), I3D inflation, divided attention, tubelets
 - [ ] Segmentation: FCN, U-Net, Mask R-CNN (RoIAlign), Dice / mIoU / PQ
 - [ ] Case-study 7-line template
+
+
+---
+
+# PART 13 — Doubts Clarified: Quick Revision
+
+> These are the extra explanations from our discussion that weren't in the parts above. Each one is kept short, for last-minute revision.
+
+## 13.1 Aspect ratio
+
+- **Aspect ratio = width ÷ height.** It is the box's **shape**, not its size.
+  - **1:1** = square (face, ball, sign)
+  - **2:1** = wide (car side-on, bus)
+  - **1:2** = tall (person, bottle)
+- **Scale ≠ aspect ratio.** 50×100 and 100×200 have the **same ratio (1:2)** but different **scales**.
+- **Why detectors use several ratios:** a square window chops a tall person or adds lots of background, so the classifier scores badly. So we try square, tall and wide boxes.
+- **Cost of sliding windows** = locations × scales × aspect ratios, which is why it is slow.
+- **Where it appears:**
+  - Faster R-CNN: 9 anchors = 3 scales × 3 ratios (1:1, 1:2, 2:1).
+  - SSD: ratios {1, 2, 3, ½, ⅓}, with w = s√a, h = s/√a.
+  - YOLOv1's weakness: "unusual aspect ratios".
+  - YOLOv2: k-means learns box shapes from the data.
+- **Check:** s = 0.48, a = 2, image 300 px → w ≈ 204, h ≈ 102, and 204/102 = 2 ✓.
+
+## 13.2 HOG + Linear SVM in plain words
+
+- **HOG = the window's "edge fingerprint".** A 64×128 window becomes 3,780 numbers describing which edge directions appear where.
+- **Training:**
+  - Positives (person crops) and negatives (background crops) → HOG vectors.
+  - The **linear SVM** finds the widest-margin flat boundary (hyperplane) between them, learning **w** (one weight per feature) and **b**.
+- **Weights:** a large positive wᵢ means "this edge pattern is typical of people"; a negative wᵢ means "typical of background".
+- **Testing:** score = **w·x + b** (a dot product). Score > 0 → person.
+  - Example: w = [2, −1, 0.5], b = −1, x = [1, 0.2, 0.4] → 2 − 0.2 + 0.2 − 1 = **1.0** → person.
+- **Image pyramid:** the window size is fixed, so you **shrink the image** repeatedly to catch big people.
+- **NMS** keeps one box per person.
+- **Why HOG:** edges and shape stay consistent while colour doesn't. Block normalisation makes it robust to lighting.
+- **Why a linear SVM:** one dot product per window, so it's fast enough for thousands of windows.
+- **Limits:** slow, hand-crafted features (plateaued around 40% mAP), a fixed window shape, one SVM per class. This led to R-CNN (swap HOG for a CNN).
+
+## 13.3 How YOLO and SSD really work (the core intuition)
+
+- **Key idea:** a CNN's feature map is a **grid**, and each cell "sees" one region (its receptive field). **Make every cell a mini-detector** that outputs `[box x, y, w, h | confidence | class probabilities]`. **All cells answer at once, in one pass**, so there are no proposals and it is fast.
+- **YOLO's toy picture (3×3 grid, one dog):** the cell containing the dog's **centre** says "conf 0.9, dog, box = …". Every other cell says "conf ≈ 0".
+  - At test time: drop the low-confidence cells, read the boxes, apply NMS.
+- **Training:**
+  - The **responsible cell** is told: right box + high confidence + right class.
+  - **All other cells** are told: confidence = 0.
+  - That is the 4-term loss. λ_noobj = 0.5 is there because there are so many empty cells.
+- **Anchors / default boxes = templates.** Each cell gets pre-made tall, wide and square boxes and predicts **small corrections (offsets)**. That is easier than drawing a box from scratch, like picking S, M or L clothes and then tailoring them.
+- **SSD = templates on 6 grids** (38×38 down to 1×1).
+  - Big grids have small cells, which find **small** objects.
+  - Small grids have large cells, which find **large** objects.
+  - Like using magnifying glasses of different sizes.
+  - Total templates = **8,732**.
+  - Most sit on background → **hard negative mining (3:1)**.
+
+| | YOLOv1 | SSD |
+|---|---|---|
+| Grids | 1 (7×7, last layer) | 6 sizes |
+| Templates | none (2 free boxes per cell) | 4–6 default boxes per cell |
+| Who detects an object | the cell containing its **centre** | every template with **IoU > 0.5** |
+| Boxes per image | 98 | 8,732 |
+| Background imbalance fix | λ_noobj = 0.5 | hard negative mining 3:1 |
+| Both | one CNN, one pass, then NMS | ← same |
+
+- **Later YOLOs borrowed SSD's ideas:** v2 added anchors (k-means), v3 added 3 grid sizes, and v8+ dropped anchors (predicting distances to the 4 edges).
+
+## 13.4 The metric chain (AP in one breath)
+
+**IoU decides TP/FP → TP/FP give precision and recall → lowering the confidence threshold one detection at a time traces the PR curve → interpolation (max precision to the right) turns the zig-zag into a falling staircase → the area under the staircase = AP (one class) → the average over classes = mAP.**
+
+- **Recall's denominator is always the number of GT objects**, not the number of detections.
+- AP punishes both **false alarms** (precision drops) and **misses** (recall never reaches 1, so area is lost).
+- **Practice** (4 GT; detections TP, FP, TP, TP):
+  - P = 1, 0.5, 0.67, 0.75; R = 0.25, 0.25, 0.5, 0.75.
+  - **11-point AP** = (3 × 1 + 5 × 0.75)/11 = **0.614**.
+  - **All-point AP** = 0.25 × 1 + 0.5 × 0.75 = **0.625**.
+- **Practice:** box [0,0,10,10] vs [5,0,15,10] → IoU = 50/150 = **0.333**, Dice = 100/200 = **0.5**.
+
+## 13.5 Why Dice is used
+
+1. **It ignores the background (no TN term):** Dice = 2TP/(2TP + FP + FN).
+   - Example: a 10,000-px scan with a 100-px tumour. Predicting "all background" gives **pixel accuracy 99%** but **Dice 0**.
+2. **It is gentler than IoU on small objects:** for a 10-px object with 5-px overlap, IoU = 0.33 but **Dice = 0.50**.
+   - Dice ≥ IoU always, and both **rank models identically** (Dice = 2·IoU/(1 + IoU)).
+3. **Dice loss = 1 − Dice** fights foreground/background imbalance during training. Cross-entropy averages over all pixels, so it is dominated by background. Common practice is **CE + Dice loss**.
+
+- **Rule of thumb:** IoU → **detection** boxes; Dice → **segmentation**, especially medical.
+
+## 13.6 MLM (Masked Language Modelling) — BERT ★
+
+- **Task:** hide some words and predict them from **both sides**. "The cat [MASK] on the mat" → predict "sat".
+- **Self-supervised:** no human labels needed, so it can use any text.
+- **Process:**
+  1. Pick **15%** of the tokens.
+  2. Of those, **80% → [MASK], 10% → a random word, 10% → unchanged**. [MASK] never appears in real use later, so this mix stops the model depending on it.
+  3. Run the **encoder**; attention looks both ways.
+  4. Predict the original word with a softmax over the vocabulary.
+- **Loss only on the masked positions:** $\mathcal{L}_{MLM} = -\sum_{i\in\text{mask}}\log p(x_i \mid x_{\text{visible}})$.
+- **BERT's other pre-training task is NSP** (Next Sentence Prediction), using the **[CLS]** token. **[SEP]** separates sentences.
+- **Pre-train, then fine-tune** (QA/SQuAD, NER, classification).
+
+| | MLM (BERT) | Autoregressive (GPT) |
+|---|---|---|
+| Task | fill in hidden words | predict the next word |
+| Context | **both sides** | left side only (masked attention) |
+| Architecture | encoder | decoder |
+| Best for | understanding | generation |
+
+- **In vision:** ImageGPT's "BERT objective" (mask pixels); **MAE / VideoMAE** (mask patches and reconstruct them). ViT borrowed BERT's **[CLS] token**.
+
+## 13.7 DETR walk-through (numbers and intuition)
+
+- **Shapes** (input 800×1216):
+  - backbone 2048×25×38
+  - 1×1 conv → 256×25×38
+  - flatten → **950 tokens** (+ positional encoding)
+  - encoder attention map 950×950
+  - decoder: **100 queries** → 100 predictions
+- Another example: 640×960 → 20×30 = **600 tokens**.
+- **Object queries = 100 "detectives":** learned vectors, the **same for every image**.
+  - **Self-attention among the queries:** they "talk" to avoid claiming the same object.
+  - **Cross-attention:** Q from the queries, K and V from the encoder.
+  - Each outputs one class (or ∅) plus a box. They are decoded **in parallel**.
+  - Over training, each query specialises in a region or size.
+- **Toy matching:**
+  - P1 and P3 both sit on bird G1; P2 sits on G2.
+  - Hungarian gives P1→G1 and P2→G2 (lowest total cost).
+  - **P3, the duplicate, is trained to say ∅.** That is how NMS becomes unnecessary.
+- **Matching cost uses −p̂; the training loss uses −log p̂.**
+  - **L1** depends on box scale.
+  - **GIoU** is scale-invariant and still gives a signal when boxes don't overlap.
+- **Auxiliary loss after every decoder layer** gives faster, more stable training.
+- **Inference:** keep the predictions that are not ∅ and are above a score threshold. No NMS, no anchors.
+- **Weak on small objects** (single 1/32 map, no FPN) and **slow to train** (~500 epochs). Fixes: Deformable DETR (multi-scale sparse attention, 10× faster convergence), DINO, RT-DETR.
+
+## 13.8 COCO
+
+- **COCO (Common Objects in Context)** is Microsoft's 2014 benchmark: everyday cluttered scenes with many **small, overlapping objects**.
+  - **80 object classes**, ~330K images (2017: ~118K train / 5K val), ~1.5M instances.
+  - Labels: **boxes, instance masks, keypoints, captions, panoptic**.
+- **The "80" in your formulas:** YOLOv3 head 3 × (5 + 80) = **255**; YOLOv8/v12 per point 64 + 80 = **144**.
+
+| | PASCAL VOC | COCO |
+|---|---|---|
+| Classes | 20 (YOLOv1's C = 20) | 80 |
+| Metric | AP@0.5 (11-point originally) | **AP@[.5:.95]** |
+| Difficulty | easier | harder (YOLOv2: 76.8% VOC vs 21.6% COCO) |
+
+- **COCO metrics:**
+  - **AP** = the mean over 10 IoU thresholds (0.50 … 0.95) and the 80 classes. AP and mAP are used interchangeably.
+  - **AP₅₀** (lenient), **AP₇₅** (strict).
+  - **AP_S** < 32² px, **AP_M** 32²–96² px, **AP_L** > 96² px.
+- **Why 10 thresholds?** To reward **tight** boxes, not just roughly placed ones.
+
+## 13.9 Hungarian algorithm (one-liner; the full version is in Part 4)
+
+- **It solves the assignment problem:** the minimum-cost one-to-one pairing in an n×n cost matrix, in **O(n³)** time instead of checking all n! pairings.
+- **Steps:** row reduce → column reduce → cover the zeros with the fewest lines → adjust by the smallest uncovered value → pick the independent zeros.
+- **Greedy can fail:** in the example, greedy gets 6 while the optimum is 5.
+- **In code:** SciPy's `linear_sum_assignment`.
+- **In DETR:** each real object gets exactly one prediction, and duplicates learn ∅.
