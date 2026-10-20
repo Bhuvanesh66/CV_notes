@@ -11,6 +11,50 @@
 
 ---
 
+## The Kaggle question — what you were actually asked
+
+**One sentence:** you are given a sentence like *"Show me pictures of potstickers."* and a pile of
+2,000 unlabelled food photos. For each sentence, you list the **20 photos** most likely to show that dish,
+best first.
+
+**What you were given** (counts re-checked on the CSV files)
+
+| Item | Detail |
+|---|---|
+| Dishes | **101** (`category_metadata.csv`: name, one-line definition, alternative names, 5 paraphrases). Each query names exactly one dish. |
+| Train | 2,000 labelled photos (19–20 per dish, some label noise) and 505 example queries (5 per dish) |
+| Validation | 1,010 photos (exactly 10 per dish), 202 queries, and the answer key (`validation_ground_truth.csv`) |
+| Test | 2,000 photos with **no labels** and **303 queries** (exactly 3 per dish) |
+| Example | Query "A photograph of a croque madame." *Gyoza* has the alternative name *potstickers*, so "Show me pictures of potstickers" means gyoza. |
+
+**What you submit.** A CSV `query_id, image_ids`: one row per test query, with **exactly 20 distinct
+test-photo ids separated by spaces, best first** (`validate_submission.py` rejects anything else).
+Limit: 5 submissions per day.
+
+**How you are scored: R-precision.** For a query whose dish has R relevant photos, look at your top R
+results. The score is the fraction that are relevant, averaged over queries. R is 10 on validation and 19–20
+on test. Example: R = 20 and 19 of your top 20 are right → 0.95. A random ranking scores about
+R/N = 20/2000 = **0.01**. Order *inside* the top R doesn't matter. The public leaderboard uses about
+half of the test queries, and the rest are scored privately [report].
+
+**Rules that shaped the design** [report: I can't see the Kaggle page]
+
+| Allowed | Forbidden | Allowed if declared |
+|---|---|---|
+| Generic pretrained models and vision-language models | Checkpoints trained to classify these food categories; outside copies of the images; matching test photos against outside collections; hand-labelling | Unsupervised use of the test gallery (rule 10b) |
+
+**Why it is hard:** 101 dishes, and many look alike (gyoza vs dumplings; steak vs filet mignon vs prime
+rib; bread pudding vs french toast), and the 20 training photos per dish are noisy.
+**Why it turned out easy once you saw it:** every query names its dish in plain text, and big pretrained
+image–text models already know these dishes. So the work is (1) read the dish out of the query,
+(2) score photos against dish names, (3) use the gallery's equal-count structure for the last few percent.
+
+**What the question is really testing:** whether you can pick a sound approach for text-to-image retrieval
+(classical vs transfer learning vs zero-shot), justify it with numbers, and follow the rules about what data
+may be used.
+
+---
+
 ## What sir said, and what it means
 
 > "Will just test the approach you used for assignment and Descriptive and mcq"
